@@ -1,0 +1,257 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h> // For parsing JSON response
+
+/*-------- PREFERENCES ----------*/
+String credentials[][2] = {
+    {"link5", "Linux.456"},
+    {"OptionalOtherSSID", "OptionalOtherSSDPassword"},
+};
+// const char* api_url = "https://www.clayexpertsroofing.com";
+// const char* api_url = "https://jsonplaceholder.typicode.com/todos";
+const char* api_url = "https://api.api-ninjas.com/v1/quotes";
+const char* apiKeyHeader = "X-Api-Key";
+const char* apiKeyValue = "hycyqPAKsxU27nZNbqKCWA==FcsNWWLoGg6COCfD";
+
+/*-------- CYD (Cheap Yellow Display) ----------*/
+#include <TFT_eSPI.h> // Hardware-specific library
+#include <SPI.h>
+#include <XPT2046_Touchscreen.h>
+
+TFT_eSPI tft = TFT_eSPI();              // Invoke custom library
+TFT_eSprite sprite = TFT_eSprite(&tft); // Sprite class
+
+// Touchscreen pins
+#define XPT2046_IRQ 36   // T_IRQ
+#define XPT2046_MOSI 32  // T_DIN
+#define XPT2046_MISO 39  // T_OUT
+#define XPT2046_CLK 25   // T_CLK
+#define XPT2046_CS 33    // T_CS
+
+SPIClass touchscreenSPI = SPIClass(VSPI);
+XPT2046_Touchscreen touchscreen(XPT2046_CS, XPT2046_IRQ);
+
+#define SCREEN_WIDTH 320
+#define SCREEN_HEIGHT 240
+#define FONT_SIZE 1
+
+// Button position and size
+#define FRAME_X 60
+#define FRAME_Y 60
+#define FRAME_W 200
+#define FRAME_H 120
+
+// Red zone size
+#define REDBUTTON_X FRAME_X
+#define REDBUTTON_Y FRAME_Y
+#define REDBUTTON_W (FRAME_W / 2)
+#define REDBUTTON_H FRAME_H
+
+// Green zone size
+#define GREENBUTTON_X (REDBUTTON_X + REDBUTTON_W)
+#define GREENBUTTON_Y FRAME_Y
+#define GREENBUTTON_W (FRAME_W / 2)
+#define GREENBUTTON_H FRAME_H
+
+// RGB LED Pins
+#define CYD_LED_BLUE 17
+#define CYD_LED_RED 4
+#define CYD_LED_GREEN 16
+
+// Touchscreen coordinates: (x, y) and pressure (z)
+int x, y, z;
+
+// Stores current button state
+bool buttonState = false;
+
+// Print Touchscreen info about X, Y and Pressure (Z) on the Serial Monitor
+void printTouchToSerial(int touchX, int touchY, int touchZ) {
+  Serial.print("X = ");
+  Serial.print(touchX);
+  Serial.print(" | Y = ");
+  Serial.print(touchY);
+  Serial.print(" | Pressure = ");
+  Serial.print(touchZ);
+  Serial.println();
+}
+
+// Draw button frame
+void drawFrame() {
+  tft.drawRect(FRAME_X, FRAME_Y, FRAME_W, FRAME_H, TFT_BLACK);
+}
+
+// Draw a red button
+void drawRedButton() {
+  tft.fillRect(REDBUTTON_X, REDBUTTON_Y, REDBUTTON_W, REDBUTTON_H, TFT_RED);
+  tft.fillRect(GREENBUTTON_X, GREENBUTTON_Y, GREENBUTTON_W, GREENBUTTON_H, TFT_WHITE);
+  drawFrame();
+  tft.setTextColor(TFT_BLACK);
+  tft.setTextSize(FONT_SIZE);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString("ON", GREENBUTTON_X + (GREENBUTTON_W / 2), GREENBUTTON_Y + (GREENBUTTON_H / 2));
+  buttonState = false;
+}
+
+// Draw a green button
+void drawGreenButton() {
+  tft.fillRect(GREENBUTTON_X, GREENBUTTON_Y, GREENBUTTON_W, GREENBUTTON_H, TFT_GREEN);
+  tft.fillRect(REDBUTTON_X, REDBUTTON_Y, REDBUTTON_W, REDBUTTON_H, TFT_WHITE);
+  drawFrame();
+  tft.setTextColor(TFT_BLACK);
+  tft.setTextSize(FONT_SIZE);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString("OFF", REDBUTTON_X + (REDBUTTON_W / 2) + 1, REDBUTTON_Y + (REDBUTTON_H / 2));
+  buttonState = true;
+}
+
+void SetupWiFi()
+{
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    int numSSIDs = sizeof(credentials) / sizeof(credentials[0]);
+    for (size_t i = 0; (i < numSSIDs); i++)
+    {
+      String ssid = credentials[i][0];
+      String pass = credentials[i][1];
+
+      Serial.print("Connecting to ");
+      Serial.println();
+      Serial.print("pass: ");
+      Serial.println(credentials[i][1]);
+
+      tft.fillScreen(TFT_BLACK);
+      tft.setTextFont(4);
+      tft.setTextSize(FONT_SIZE);
+      tft.setTextDatum(MC_DATUM);
+      tft.drawString("Connecting to", 320 / 2, 240 / 2 - 40);
+      tft.drawString(ssid, 320 / 2, 240 / 2);
+
+      WiFi.begin(ssid.c_str(), pass.c_str());
+
+      int tries = 5 * 2;
+      String dots = "";
+      while (WiFi.status() != WL_CONNECTED && tries-- > 0)
+      {
+        delay(500);
+        Serial.print(".");
+        dots = dots + ".";
+        tft.drawString(dots, 320 / 2, 240 / 2 + 20);
+      }
+
+      if (WiFi.status() == WL_CONNECTED)
+        break;
+    }
+  }
+}
+
+void requestAPI() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(api_url);
+    http.addHeader(apiKeyHeader, apiKeyValue);
+
+    int httpCode = http.GET();
+    if (httpCode > 0) {
+      if (httpCode == HTTP_CODE_OK) {
+        String payload = http.getString();
+        Serial.println(payload);
+        tft.setTextColor(TFT_YELLOW);
+        // tft.drawString(payload, 320 / 2, 240 / 2 - 40);
+        // tft.drawString(payload, 20, 10, 2);
+
+        // Example JSON parsing
+        DynamicJsonDocument doc(1024);
+        DeserializationError error = deserializeJson(doc, payload);
+        if (!error) {
+          Serial.println(doc[0]["quote"].as<String>());
+
+          int quoteLength = doc[0]["quote"].as<String>().length();
+          if (quoteLength > 50) {
+            String quotePartOne = doc[0]["quote"].as<String>().substring(0, 45);
+            String quotePartTwo = doc[0]["quote"].as<String>().substring(45, 90);
+            String quotePartTree = doc[0]["quote"].as<String>().substring(90);
+            tft.drawString(quotePartOne, 320 / 2, 10, 2);
+            tft.drawString(quotePartTwo, 320 / 2, 30, 2);
+            tft.drawString(quotePartTree, 320 / 2, 50, 2);
+          }
+          else {
+            tft.drawString(doc[0]["quote"].as<String>(), 320 / 2, 10, 2);
+          }
+
+          // tft.drawString(String(quoteLength), 320 / 2, 10, 2);
+          // tft.drawString(doc[0]["quote"].as<String>(), 320 / 2, 30, 2);
+          // tft.drawString(doc[0]["author"].as<String>(), 320 / 2, 50, 2);
+          // tft.drawString(doc[0]["category"].as<String>(), 320 / 2, 70, 2);
+        }
+      }
+    } else {
+      Serial.printf("[HTTP] GET failed, error: %s\n", http.errorToString(httpCode).c_str());
+    }
+
+    http.end();
+  }
+}
+
+/*-------- SETUP & LOOP ----------*/
+void setup()
+{
+  Serial.begin(115200);
+  SetupWiFi();
+  // Start the SPI for the touchscreen and init the touchscreen
+  touchscreenSPI.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
+  touchscreen.begin(touchscreenSPI);
+  // Set the Touchscreen rotation in landscape mode
+  // Note: in some displays, the touchscreen might be upside down, so you might need to set the rotation to 3: touchscreen.setRotation(3);
+  touchscreen.setRotation(1);
+
+  // Start the tft display
+  tft.init();
+  // Set the TFT display rotation in landscape mode
+  tft.setRotation(1);
+
+  // Clear the screen before writing to it
+  tft.fillScreen(TFT_BLACK);
+
+  // Draw button 
+  drawGreenButton();
+
+  pinMode(CYD_LED_GREEN, OUTPUT);
+  digitalWrite(CYD_LED_GREEN, LOW);
+}
+
+void loop() {
+  // Checks if Touchscreen was touched, and prints X, Y and Pressure (Z) info on the TFT display and Serial Monitor
+  if (touchscreen.tirqTouched() && touchscreen.touched()) {
+    // Get Touchscreen points
+    TS_Point p = touchscreen.getPoint();
+    // Calibrate Touchscreen points with map function to the correct width and height
+    x = map(p.x, 200, 3700, 1, SCREEN_WIDTH);
+    y = map(p.y, 240, 3800, 1, SCREEN_HEIGHT);
+    z = p.z;
+
+    printTouchToSerial(x, y, z);
+
+    if (buttonState) {
+      Serial.println("ON");
+      if ((x > REDBUTTON_X) && (x < (REDBUTTON_X + REDBUTTON_W))) {
+        if ((y > (REDBUTTON_Y)) && (y <= (REDBUTTON_Y + REDBUTTON_H))) {
+          Serial.println("Red button pressed");
+          drawRedButton();
+          digitalWrite(CYD_LED_GREEN, HIGH);
+        }
+      }
+    }
+    else {
+      Serial.println("OFF");
+      if ((x > (GREENBUTTON_X)) && (x < (GREENBUTTON_X + GREENBUTTON_W))) {
+        if ((y > (GREENBUTTON_Y)) && (y <= (GREENBUTTON_Y + GREENBUTTON_H))) {
+          Serial.println("Green button pressed");
+          tft.fillScreen(TFT_BLACK);
+          drawGreenButton();
+          digitalWrite(CYD_LED_GREEN, LOW);
+          requestAPI();
+        }
+      }
+    }
+  }
+}
