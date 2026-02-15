@@ -1,0 +1,41 @@
+# --- PlatformIO Core ---
+.pio/
+.pioenvs/
+.piolibdeps/
+.clang_complete
+.gcc-flags.json
+platformio.ini.local
+
+# --- Build & Artifacts ---
+.test/
+build/
+dist/
+
+# --- ESP-IDF / ESP Specifics ---
+sdkconfig.old
+sdkconfig.h
+# sdkconfig is usually committed for consistent builds
+
+# --- VS Code & IDEs ---
+.vscode/
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/settings.json
+*.swp
+*.swo
+.DS_Store
+
+# --- Sensitive Data / Secrets ---
+# Common files used for Wi-Fi credentials and API keys
+secrets.h
+wifi_secrets.h
+include/secrets.h
+include/wifi_secrets.h
+env.h
+.env
+.env.*
+
+# --- Python (if using custom scripts) ---
+__pycache__/
+*.py[cod]
+*$py.class
