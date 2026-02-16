@@ -87,30 +87,25 @@ void flowControlTask(void * pvParameters) {
 void handleRoot() { server.send_P(200, "text/html", INDEX_HTML); }
 
 void broadcastStatus() {
-    // 1. Send Volume/Target Update
-    StaticJsonDocument<256> volDoc;
+    // Consolidated Status Update
+    StaticJsonDocument<512> doc;
+    
     unsigned long currentSession = state.accumulatedTimeMs;
     if (state.relayActive) currentSession += (millis() - state.relayStartTime);
 
-    volDoc["type"] = "volumeUpdate";
-    volDoc["vol"] = state.accumulatedVolume;
-    volDoc["target"] = state.volumeTarget;
-    volDoc["elapsed"] = currentSession / 1000;
-    volDoc["targetReached"] = state.targetReached;
-    volDoc["uptime"] = millis() / 1000;
+    doc["type"] = "status";
+    doc["flow"] = state.currentFlow;
+    doc["vol"] = state.accumulatedVolume;
+    doc["target"] = state.volumeTarget;
+    doc["elapsed"] = currentSession / 1000;
+    doc["targetReached"] = state.targetReached;
+    doc["uptime"] = millis() / 1000;
+    doc["relay"] = state.relayActive;
+    doc["valve"] = state.valveActive;
 
-    String volMsg;
-    serializeJson(volDoc, volMsg);
-    webSocket.broadcastTXT(volMsg);
-
-    // 2. Send Flow Rate Update (Requirement for gauge)
-    StaticJsonDocument<128> flowDoc;
-    flowDoc["type"] = "flow";
-    flowDoc["val"] = state.currentFlow;
-    
-    String flowMsg;
-    serializeJson(flowDoc, flowMsg);
-    webSocket.broadcastTXT(flowMsg);
+    String msg;
+    serializeJson(doc, msg);
+    webSocket.broadcastTXT(msg);
 }
 
 void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
@@ -201,9 +196,10 @@ void setup() {
     // ADC Resolution for Industrial accuracy
     analogReadResolution(12);
 
-    // WiFi Robustness
+    // WiFi Robustness & Performance
     WiFi.setHostname("esp32-industrial-flow");
     WiFi.setAutoReconnect(true);
+    WiFi.setSleep(false); // CRITICAL: Performance fix for laggy web servers
     WiFi.begin(ssid, password);
 
     server.on("/", handleRoot);
@@ -222,9 +218,9 @@ void loop() {
     server.handleClient();
     webSocket.loop();
 
-    // Periodic backups and UI refreshes (Core 0 handles this)
+    // Periodic UI refreshes (Core 0 handles the radio, but loop runs on Core 1)
     static unsigned long lastUpdate = 0;
-    if (millis() - lastUpdate > 2000) {
+    if (millis() - lastUpdate > 250) { // Increased from 2000ms to 250ms for smooth updates
         lastUpdate = millis();
         broadcastStatus();
         

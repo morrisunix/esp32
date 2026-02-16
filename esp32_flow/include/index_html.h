@@ -380,28 +380,33 @@ const char INDEX_HTML[] PROGMEM = R"=====(
             socket.onmessage = (event) => {
                 const data = JSON.parse(event.data);
                 
-                if (data.type === 'flow') {
-                    const val = data.val.toFixed(1);
-                    document.getElementById('flow-val').innerText = val;
-                    const offset = 440 - (440 * Math.min(val, 100) / 100);
+                if (data.type === 'status') {
+                    // 1. Update Flow Gauge
+                    const flowVal = data.flow.toFixed(1);
+                    document.getElementById('flow-val').innerText = flowVal;
+                    const offset = 440 - (440 * Math.min(flowVal, 100) / 100);
                     document.getElementById('flow-bar').style.strokeDashoffset = offset;
-                } 
-                else if (data.type === 'volumeUpdate') {
+
+                    // 2. Update Volume & Target
                     document.getElementById('vol-val').innerText = data.vol.toFixed(2);
                     document.getElementById('vol-target-display').innerText = Math.round(data.target);
                     
+                    // 3. Update Session Time
                     const s = data.elapsed;
                     const h = Math.floor(s / 3600).toString().padStart(2, '0');
                     const m = Math.floor((s % 3600) / 60).toString().padStart(2, '0');
                     const sec = (s % 60).toString().padStart(2, '0');
                     document.getElementById('session-time').innerText = `${h}:${m}:${sec}`;
                     
+                    // 4. Update Status & Progress
                     const statusEl = document.getElementById('batch-status');
+                    const mainBtn = document.getElementById('main-btn');
+                    
                     if (data.targetReached) {
                         statusEl.innerText = "COMPLETED";
                         statusEl.style.color = "var(--danger)";
                         document.getElementById('batch-progress').style.background = "var(--danger)";
-                    } else if (document.getElementById('main-btn').classList.contains('active')) {
+                    } else if (data.relay) {
                         statusEl.innerText = "RUNNING";
                         statusEl.style.color = "var(--success)";
                         document.getElementById('batch-progress').style.background = "linear-gradient(to right, var(--primary), var(--secondary))";
@@ -414,43 +419,47 @@ const char INDEX_HTML[] PROGMEM = R"=====(
                     const pct = Math.min((data.vol / data.target) * 100, 100);
                     document.getElementById('batch-progress').style.width = `${pct}%`;
 
-                    // Update Device Uptime
+                    // 5. Update Uptime
                     const upSec = data.uptime;
                     const upH = Math.floor(upSec / 3600);
                     const upM = Math.floor((upSec % 3600) / 60);
                     const upS = upSec % 60;
-                    let upStr = "";
-                    if (upH > 0) upStr += upH + "h ";
-                    if (upM > 0 || upH > 0) upStr += upM + "m ";
-                    upStr += upS + "s";
-                    document.getElementById('uptime').innerText = upStr;
+                    document.getElementById('uptime').innerText = `${upH}h ${upM}m ${upS}s`;
+
+                    // 6. Sync Button States
+                    updateButtonState('main-btn', data.relay, 13);
+                    updateButtonState('valve-btn', data.valve, 16);
                 } 
                 else if (data.type === 'pinState') {
                     const btnId = data.pin === 13 ? 'main-btn' : 'valve-btn';
-                    const btn = document.getElementById(btnId);
-                    if (btn) {
-                        if (data.state) {
-                            btn.classList.add('active');
-                            if(data.pin === 13) {
-                                btn.innerText = "Pause Batch";
-                                document.getElementById('vol-input').disabled = true;
-                                document.getElementById('vol-input').style.opacity = "0.5";
-                                document.querySelector('.btn-danger').disabled = true;
-                                document.querySelector('.btn-danger').style.opacity = "0.5";
-                            }
-                        } else {
-                            btn.classList.remove('active');
-                            if(data.pin === 13) {
-                                btn.innerText = "Start/Resume";
-                                document.getElementById('vol-input').disabled = false;
-                                document.getElementById('vol-input').style.opacity = "1";
-                                document.querySelector('.btn-danger').disabled = false;
-                                document.querySelector('.btn-danger').style.opacity = "1";
-                            }
-                        }
-                    }
+                    updateButtonState(btnId, data.state, data.pin);
                 }
             };
+        }
+
+        function updateButtonState(btnId, state, pin) {
+            const btn = document.getElementById(btnId);
+            if (!btn) return;
+            
+            if (state) {
+                btn.classList.add('active');
+                if(pin === 13) {
+                    btn.innerText = "Pause Batch";
+                    document.getElementById('vol-input').disabled = true;
+                    document.getElementById('vol-input').style.opacity = "0.5";
+                    document.querySelector('.btn-danger').disabled = true;
+                    document.querySelector('.btn-danger').style.opacity = "0.5";
+                }
+            } else {
+                btn.classList.remove('active');
+                if(pin === 13) {
+                    btn.innerText = "Start/Resume";
+                    document.getElementById('vol-input').disabled = false;
+                    document.getElementById('vol-input').style.opacity = "1";
+                    document.querySelector('.btn-danger').disabled = false;
+                    document.querySelector('.btn-danger').style.opacity = "1";
+                }
+            }
         }
 
         function togglePin(pin) {
