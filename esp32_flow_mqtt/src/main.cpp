@@ -20,7 +20,7 @@
 
 // Network Globals
 const char* ssid = "roku";
-const char* password = "Linux.45";
+const char* password = "Linux.456";
 
 WiFiClient net;
 PubSubClient client(net);
