@@ -77,7 +77,7 @@ const char INDEX_HTML[] PROGMEM = R"=====(
             padding: 2rem;
             border-radius: 24px;
             border: 1px solid rgba(255, 255, 255, 0.1);
-            transition: all 0.4s ease;
+            transition: all 0.2s ease;
             backdrop-filter: blur(12px);
             text-align: center;
             display: flex;
@@ -105,7 +105,7 @@ const char INDEX_HTML[] PROGMEM = R"=====(
             height: 100%;
             background: linear-gradient(to right, var(--primary), var(--secondary));
             border-radius: 5px;
-            transition: width 0.4s ease, background 0.4s ease;
+            transition: width 0.2s ease, background 0.2s ease;
             box-shadow: 0 0 10px rgba(0, 242, 254, 0.3);
         }
 
@@ -134,7 +134,7 @@ const char INDEX_HTML[] PROGMEM = R"=====(
             stroke-width: 10;
             stroke-dasharray: 440;
             stroke-dashoffset: 440;
-            transition: stroke-dashoffset 0.5s ease;
+            transition: stroke-dashoffset 0.2s ease;
             stroke-linecap: round;
         }
 

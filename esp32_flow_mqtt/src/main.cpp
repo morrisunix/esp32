@@ -4,8 +4,9 @@
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include <esp_task_wdt.h>
-#include <WiFiClient.h>
+#include <WiFiClientSecure.h>
 #include <PubSubClient.h>
+#include <esp_wifi.h>
 #include "index_html.h"
 #include "secrets.h"
 
@@ -19,10 +20,16 @@
 
 // Network Globals
 const char* ssid = "roku";
-const char* password = "Linux.456";
+const char* password = "Linux.45";
 
 WiFiClient net;
 PubSubClient client(net);
+String mqttPubTopic;
+String mqttClientId;
+String mqttSubTopic;
+String mqttCompletedTopic;
+bool pendingCompletionMqtt = false;
+bool isAPMode = false;
 
 // Global Objects
 WebServer server(80);
@@ -39,6 +46,11 @@ struct SystemState {
     bool targetReached = false;
     unsigned long relayStartTime = 0;
     unsigned long accumulatedTimeMs = 0;
+    
+    // Batch Metrics
+    time_t batchStartTime = 0;
+    int pauseCount = 0;
+    unsigned long batchStartMillis = 0;
 } state;
 
 class KalmanFilter {
@@ -84,6 +96,7 @@ void flowControlTask(void * pvParameters) {
                 state.targetReached = true;
                 state.relayActive = false;
                 digitalWrite(RELAY_PIN, LOW);
+                pendingCompletionMqtt = true; // Flag for MQTT task
                 Serial.println("[CRITICAL] Target Reached. Pump OFF.");
                 broadcastStatus();
             }
@@ -134,15 +147,23 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
             if (pin == RELAY_PIN) {
                 state.relayActive = !state.relayActive;
                 digitalWrite(RELAY_PIN, state.relayActive ? HIGH : LOW);
+                
                 if (state.relayActive) {
+                    bool isNewBatch = (state.accumulatedVolume <= 0.01 || state.targetReached);
                     if (state.targetReached) { 
                         state.accumulatedVolume = 0; 
                         state.accumulatedTimeMs = 0; 
                         state.targetReached = false; 
                     }
+                    if (isNewBatch) {
+                        state.batchStartTime = time(nullptr);
+                        state.batchStartMillis = millis();
+                        state.pauseCount = 0;
+                    }
                     state.relayStartTime = millis();
                 } else {
                     state.accumulatedTimeMs += (millis() - state.relayStartTime);
+                    state.pauseCount++;
                     saveVolumeToNVS();
                 }
             } else if (pin == VALVE_PIN) {
@@ -177,7 +198,13 @@ void saveVolumeToNVS() {
 void syncTime() {
     configTime(0, 0, "pool.ntp.org", "time.nist.gov");
     Serial.print("[TIME] Syncing time...");
+    
+    unsigned long startSync = millis();
     while (time(nullptr) < 1000 * 1000) {
+        if (millis() - startSync > 5000) {
+            Serial.println("\n[TIME] Sync timeout! Continuing without network time.");
+            return;
+        }
         esp_task_wdt_reset();
         delay(500);
         Serial.print(".");
@@ -186,19 +213,64 @@ void syncTime() {
 }
 
 void messageHandler(char* topic, byte* payload, unsigned int length) {
-    String msg = "";
-    for (int i = 0; i < length; i++) msg += (char)payload[i];
-    if (msg == "relayOn") { state.relayActive = true; digitalWrite(RELAY_PIN, HIGH); }
-    else if (msg == "relayOff") { state.relayActive = false; digitalWrite(RELAY_PIN, LOW); }
+    StaticJsonDocument<256> doc;
+    DeserializationError error = deserializeJson(doc, payload, length);
+
+    if (error) {
+        Serial.print("[MQTT] JSON Parse failed: ");
+        Serial.println(error.c_str());
+        return;
+    }
+
+    // Update Target (if present and valid)
+    if (doc.containsKey("target")) {
+        float newTarget = doc["target"].as<float>();
+        if (newTarget > state.accumulatedVolume) {
+            state.volumeTarget = newTarget;
+            state.targetReached = false;
+            Serial.printf("[MQTT] New Target: %.2f L\n", state.volumeTarget);
+        }
+    }
+
+    // Control Relay (Start/Pause)
+    if (doc.containsKey("start")) {
+        bool shouldStart = doc["start"].as<bool>();
+        if (shouldStart != state.relayActive) {
+            state.relayActive = shouldStart;
+            digitalWrite(RELAY_PIN, state.relayActive ? HIGH : LOW);
+            
+            if (state.relayActive) {
+                bool isNewBatch = (state.accumulatedVolume <= 0.01 || state.targetReached);
+                if (state.targetReached) {
+                    state.accumulatedVolume = 0;
+                    state.accumulatedTimeMs = 0;
+                    state.targetReached = false;
+                }
+                if (isNewBatch) {
+                    state.batchStartTime = time(nullptr);
+                    state.batchStartMillis = millis();
+                    state.pauseCount = 0;
+                }
+                state.relayStartTime = millis();
+                Serial.println("[MQTT] Relay: ON");
+            } else {
+                state.accumulatedTimeMs += (millis() - state.relayStartTime);
+                state.pauseCount++;
+                saveVolumeToNVS();
+                Serial.println("[MQTT] Relay: OFF (Paused)");
+            }
+        }
+    }
+    broadcastStatus();
 }
 
 void connectToMQTT() {
     Serial.printf("\n[MQTT] Connecting to %s:%d...\n", MQTT_BROKER, MQTT_PORT);
     
-    // Attempt connection
-    if (client.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASS)) {
-        Serial.println("[MQTT] Success! Connected to Mosquitto.");
-        client.subscribe(MQTT_SUB_TOPIC);
+    // Standard MQTT connection: client.connect(ID, User, Pass)
+    if (client.connect(mqttClientId.c_str(), MQTT_USER, MQTT_PASS)) {
+        Serial.printf("[MQTT] Success! Connected as %s\n", mqttClientId.c_str());
+        client.subscribe(mqttSubTopic.c_str());
     } else {
         Serial.printf("[MQTT] Connection Failed, rc=%d\n", client.state());
     }
@@ -211,6 +283,11 @@ void mqttTask(void * pvParameters) {
     
     for(;;) {
         esp_task_wdt_reset(); 
+        if (isAPMode) {
+            Serial.println("[MQTT] AP Mode detected. Cleaning up.");
+            esp_task_wdt_delete(NULL); // Deregister from WDT before deleting
+            vTaskDelete(NULL); 
+        }
         if (WiFi.status() == WL_CONNECTED) {
             if (!client.connected()) {
                 connectToMQTT();
@@ -231,17 +308,53 @@ void mqttTask(void * pvParameters) {
                     char buffer[200];
                     serializeJson(doc, buffer);
                     
-                    if (client.publish(MQTT_PUB_TOPIC, buffer)) {
-                        Serial.printf("[MQTT] Published to [%s]: %s\n", MQTT_PUB_TOPIC, buffer);
+                    if (client.publish(mqttPubTopic.c_str(), buffer)) {
+                        Serial.printf("[MQTT] Published to [%s]: %s\n", mqttPubTopic.c_str(), buffer);
                     } else {
-                        Serial.printf("[MQTT] Publish FAILED to [%s]\n", MQTT_PUB_TOPIC);
+                        Serial.printf("[MQTT] Publish FAILED to [%s]\n", mqttPubTopic.c_str());
+                    }
+                }
+
+                // Batch Completion Publishing
+                if (pendingCompletionMqtt) {
+                    pendingCompletionMqtt = false;
+                    
+                    StaticJsonDocument<512> doc;
+                    time_t now = time(nullptr);
+                    
+                    // Format Start Time
+                    String startTimeStr = "N/A";
+                    if (state.batchStartTime > 0) {
+                        startTimeStr = ctime(&state.batchStartTime);
+                        startTimeStr.trim();
+                    }
+                    
+                    // Format End Time
+                    String endTimeStr = ctime(&now);
+                    endTimeStr.trim();
+
+                    doc["event"] = "BATCH_COMPLETED";
+                    doc["startTime"] = startTimeStr;
+                    doc["endTime"] = endTimeStr;
+                    doc["durationSeconds"] = (millis() - state.batchStartMillis) / 1000;
+                    doc["pauseCount"] = state.pauseCount;
+                    doc["finalVolume"] = state.accumulatedVolume;
+                    doc["target"] = state.volumeTarget;
+
+                    char buffer[512];
+                    serializeJson(doc, buffer);
+                    
+                    if (client.publish(mqttCompletedTopic.c_str(), buffer)) {
+                        Serial.printf("[MQTT] COMPLETE Notification sent to [%s]\n", mqttCompletedTopic.c_str());
                     }
                 }
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(100)); 
+        vTaskDelay(pdMS_TO_TICKS(10)); 
     }
 }
+
+#define AP_SSID "tecotrack"
 
 void setup() {
     Serial.begin(115200);
@@ -271,10 +384,46 @@ void setup() {
     
     if (WiFi.status() == WL_CONNECTED) {
         Serial.println("\n[WIFI] Connected OK");
+        isAPMode = false;
+        
+        // Dynamic Identifiers Generation
+        String mac = WiFi.macAddress();
+        mac.replace(":", ""); // Remove colons
+        
+        mqttClientId = "ESP32-" + mac;
+        mqttPubTopic = "esp32/" + mac + "/flow/status";
+        mqttSubTopic = "esp32/" + mac + "/sub";
+        mqttCompletedTopic = "esp32/" + mac + "/flow/completed";
+        
+        Serial.printf("[MQTT] ClientID:  %s\n", mqttClientId.c_str());
+        Serial.printf("[MQTT] Pub Topic: %s\n", mqttPubTopic.c_str());
+        Serial.printf("[MQTT] Sub Topic: %s\n", mqttSubTopic.c_str());
+        Serial.printf("[MQTT] Comp Topic: %s\n", mqttCompletedTopic.c_str());
+
         syncTime();
     } else {
-        Serial.println("\n[WIFI] Connection FAILED (Timeout)");
+        Serial.println("\n[WIFI] Connection FAILED. Starting Access Point...");
+        isAPMode = true;
+        WiFi.mode(WIFI_AP);
+        WiFi.softAP(AP_SSID); 
+        
+        Serial.print("[WIFI] AP Started. SSID: ");
+        Serial.println(AP_SSID);
+        Serial.print("[WIFI] AP IP: ");
+        Serial.println(WiFi.softAPIP());
     }
+
+    // WiFi Event Handlers for AP Mode
+    WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info){
+        if (event == ARDUINO_EVENT_WIFI_AP_STACONNECTED) {
+            Serial.println("[AP] Client connected to tecotrac");
+        } else if (event == ARDUINO_EVENT_WIFI_AP_STAIPASSIGNED) {
+            Serial.print("[AP] IP Assigned to client: ");
+            Serial.println(IPAddress(info.wifi_ap_staipassigned.ip.addr));
+        } else if (event == ARDUINO_EVENT_WIFI_AP_STADISCONNECTED) {
+            Serial.println("[AP] Client disconnected from tecotrac");
+        }
+    });
 
     server.on("/", handleRoot);
     server.begin();
@@ -289,7 +438,12 @@ void setup() {
 
     // Task Spawning
     xTaskCreatePinnedToCore(flowControlTask, "FlowTask", 4096, NULL, 5, NULL, 1);
-    xTaskCreatePinnedToCore(mqttTask, "MQTTTask", 16384, NULL, 3, NULL, 0);
+    
+    if (!isAPMode) {
+        xTaskCreatePinnedToCore(mqttTask, "MQTTTask", 16384, NULL, 3, NULL, 0);
+    } else {
+        Serial.println("[SYSTEM] Skipping MQTT Task in AP Mode.");
+    }
 
     Serial.println("[SYSTEM] Setup Sequence Complete.");
 }
@@ -300,7 +454,7 @@ void loop() {
     webSocket.loop();
 
     static unsigned long lastUpdate = 0;
-    if (millis() - lastUpdate > 2000) {
+    if (millis() - lastUpdate > 200) {
         lastUpdate = millis();
         broadcastStatus();
         
