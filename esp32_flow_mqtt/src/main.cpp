@@ -7,6 +7,7 @@
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <esp_wifi.h>
+#include <DNSServer.h>
 #include "index_html.h"
 #include "secrets.h"
 
@@ -34,6 +35,7 @@ bool isAPMode = false;
 // Global Objects
 WebServer server(80);
 WebSocketsServer webSocket(81);
+DNSServer dnsServer;
 Preferences preferences;
 
 // Volatile System State
@@ -355,6 +357,7 @@ void mqttTask(void * pvParameters) {
 }
 
 #define AP_SSID "tecotrack"
+#define AP_PASS "73C07r4cK.26"
 
 void setup() {
     Serial.begin(115200);
@@ -405,12 +408,16 @@ void setup() {
         Serial.println("\n[WIFI] Connection FAILED. Starting Access Point...");
         isAPMode = true;
         WiFi.mode(WIFI_AP);
-        WiFi.softAP(AP_SSID); 
+        WiFi.softAP(AP_SSID, AP_PASS); 
         
         Serial.print("[WIFI] AP Started. SSID: ");
         Serial.println(AP_SSID);
         Serial.print("[WIFI] AP IP: ");
         Serial.println(WiFi.softAPIP());
+
+        // DNS Redirect: control.tecotrack.com -> 192.168.4.1
+        dnsServer.start(53, "control.tecotrack.com", WiFi.softAPIP());
+        Serial.println("[WIFI] DNS Started: control.tecotrack.com");
     }
 
     // WiFi Event Handlers for AP Mode
@@ -450,6 +457,7 @@ void setup() {
 
 void loop() {
     esp_task_wdt_reset();
+    if (isAPMode) dnsServer.processNextRequest();
     server.handleClient();
     webSocket.loop();
 
